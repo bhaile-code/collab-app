@@ -446,6 +446,8 @@ export default function PlanPage({ params }: PageProps) {
 
   const handleCardClick = (ideaId: string) => {
     const idea = ideas.find((i) => i.id === ideaId)
+    console.log('🔍 handleCardClick - found idea:', idea?.title)
+    console.log('🔍 handleCardClick - idea attachments:', idea?.attachments)
     if (idea) {
       setEditingIdea(idea)
     }
@@ -696,7 +698,20 @@ export default function PlanPage({ params }: PageProps) {
 
       <IdeaCaptureModal
         isOpen={isIdeaModalOpen}
-        onClose={() => setIsIdeaModalOpen(false)}
+        onClose={async () => {
+          setIsIdeaModalOpen(false)
+          // Refetch ideas to ensure we have the latest data including attachments
+          console.log('🔄 Starting refetch after modal close...')
+          try {
+            const refreshedIdeas = await listIdeasByPlan(plan.id)
+            console.log('🔄 Refetch complete, ideas count:', refreshedIdeas.length)
+            console.log('🔄 First idea attachments after refetch:', refreshedIdeas[0]?.attachments)
+            setIdeas(refreshedIdeas)
+            console.log('✅ Ideas state updated with refreshed data')
+          } catch (error) {
+            console.error("Failed to refresh ideas after modal close:", error)
+          }
+        }}
         onSubmit={handleSubmitIdea}
         buckets={buckets.map((b) => ({
           id: b.id,
@@ -737,6 +752,7 @@ export default function PlanPage({ params }: PageProps) {
                 date: editingIdea.date ?? undefined,
                 bucketId: editingIdea.bucket_id ?? undefined,
                 confidence: editingIdea.confidence,
+                attachments: editingIdea.attachments,
               }
             : undefined
         }

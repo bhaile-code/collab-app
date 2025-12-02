@@ -30,7 +30,25 @@ export async function createIdea(data: IdeaInsert): Promise<Idea> {
 export async function getIdeaById(id: string): Promise<Idea> {
   const { data: idea, error } = await supabase
     .from('ideas')
-    .select('*')
+    .select(`
+      id,
+      plan_id,
+      bucket_id,
+      title,
+      description,
+      location,
+      date,
+      budget,
+      confidence,
+      created_by,
+      created_at,
+      updated_at,
+      latitude,
+      longitude,
+      geocoded_place_name,
+      link_preview_json,
+      attachments
+    `)
     .eq('id', id)
     .single()
 
@@ -54,13 +72,34 @@ export async function getIdeaById(id: string): Promise<Idea> {
 export async function listIdeasByPlanId(planId: string): Promise<Idea[]> {
   const { data: ideas, error } = await supabase
     .from('ideas')
-    .select('*')
+    .select(`
+      id,
+      plan_id,
+      bucket_id,
+      title,
+      description,
+      location,
+      date,
+      budget,
+      confidence,
+      created_by,
+      created_at,
+      updated_at,
+      latitude,
+      longitude,
+      geocoded_place_name,
+      link_preview_json,
+      attachments
+    `)
     .eq('plan_id', planId)
     .order('created_at', { ascending: false })
 
   if (error) {
     throw new DatabaseError('Failed to list ideas', error)
   }
+
+  console.log('📊 listIdeasByPlanId - fetched ideas:', ideas?.length)
+  console.log('📊 First idea attachments:', ideas?.[0]?.attachments)
 
   return ideas || []
 }
@@ -107,6 +146,8 @@ export async function listIdeasWithBuckets(planId: string) {
  * Update an idea
  */
 export async function updateIdea(id: string, data: IdeaUpdate): Promise<Idea> {
+  console.log('💾 updateIdea - updating with data:', { id, attachments: data.attachments })
+
   const { data: idea, error } = await supabase
     .from('ideas')
     .update(data)
@@ -124,6 +165,8 @@ export async function updateIdea(id: string, data: IdeaUpdate): Promise<Idea> {
   if (!idea) {
     throw new NotFoundError('Idea', id)
   }
+
+  console.log('💾 updateIdea - returned idea attachments:', idea.attachments)
 
   return idea
 }

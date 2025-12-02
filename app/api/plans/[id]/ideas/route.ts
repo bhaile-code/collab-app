@@ -56,7 +56,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       throw new ValidationError('Invalid request data', validation.error.errors)
     }
 
-    const { title, description, bucketId, location, date, budget, confidence } = validation.data
+    const { title, description, bucketId, location, date, budget, confidence, attachments } = validation.data
 
     // Create idea (may start unbucketed if auto-classifying)
     const idea = await createIdea({
@@ -73,6 +73,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       longitude: null,
       geocoded_place_name: null,
       link_preview_json: null,
+      attachments: attachments ?? undefined,
     })
 
     // Background metadata enrichment (non-blocking)

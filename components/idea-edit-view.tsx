@@ -20,6 +20,13 @@ interface Bucket {
   color: "blue" | "green" | "orange" | "purple" | "gray"
 }
 
+interface AttachmentMeta {
+  url: string
+  filename: string
+  type: string
+  size: number
+}
+
 interface IdeaData {
   id?: string
   title: string // Now explicit title field
@@ -32,6 +39,7 @@ interface IdeaData {
   includeTime?: boolean
   bucketId?: string
   confidence?: number
+  attachments?: AttachmentMeta[]
 }
 
 interface IdeaEditViewProps {
@@ -77,6 +85,7 @@ export function IdeaEditView({ isOpen, idea, buckets = defaultBuckets, onClose, 
   const [includeTime, setIncludeTime] = useState(false)
   const [selectedBucketId, setSelectedBucketId] = useState<string>("general")
   const [confidence, setConfidence] = useState<number>(85)
+  const [attachments, setAttachments] = useState<AttachmentMeta[]>([])
 
   // UI state
   const [isSaving, setIsSaving] = useState(false)
@@ -102,6 +111,8 @@ export function IdeaEditView({ isOpen, idea, buckets = defaultBuckets, onClose, 
         setIncludeTime(idea.includeTime || false)
         setSelectedBucketId(idea.bucketId || "general")
         setConfidence(idea.confidence ?? 85)
+        setAttachments(idea.attachments || [])
+        console.log("📎 Loaded attachments in edit view:", idea.attachments)
       } else {
         resetForm()
       }
@@ -149,6 +160,7 @@ export function IdeaEditView({ isOpen, idea, buckets = defaultBuckets, onClose, 
     setIncludeTime(false)
     setSelectedBucketId("general")
     setConfidence(85)
+    setAttachments([])
     setHasChanges(false)
     setAutoDetectedUrl(false)
   }, [])
@@ -206,6 +218,7 @@ export function IdeaEditView({ isOpen, idea, buckets = defaultBuckets, onClose, 
         includeTime,
         bucketId: selectedBucketId,
         confidence,
+        attachments: attachments.length > 0 ? attachments : undefined,
       })
       resetForm()
     } catch (error) {
@@ -517,6 +530,47 @@ export function IdeaEditView({ isOpen, idea, buckets = defaultBuckets, onClose, 
                 )}
               </div>
             </div>
+
+            {/* Attachments Display */}
+            {attachments && attachments.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium mb-1.5">Attachments</label>
+                <div className="flex flex-wrap gap-2">
+                  {attachments.map((attachment, index) => (
+                    attachment.type.startsWith("image/") ? (
+                      <button
+                        key={index}
+                        onClick={(e) => {
+                          e.preventDefault()
+                          window.open(attachment.url, "_blank")
+                        }}
+                        className="relative w-20 h-20 rounded-lg overflow-hidden hover:ring-2 hover:ring-primary transition-all"
+                      >
+                        <img
+                          src={attachment.url}
+                          alt={attachment.filename}
+                          className="w-full h-full object-cover"
+                        />
+                      </button>
+                    ) : (
+                      <a
+                        key={index}
+                        href={attachment.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex items-center gap-2 px-3 py-2 bg-red-50 dark:bg-red-900/20 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors"
+                      >
+                        <ImageIcon className="w-4 h-4 text-red-600 dark:text-red-400" />
+                        <span className="text-sm text-red-700 dark:text-red-300 max-w-xs truncate">
+                          {attachment.filename}
+                        </span>
+                      </a>
+                    )
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Bucket selector */}
             <div>
