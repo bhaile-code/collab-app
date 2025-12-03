@@ -2,6 +2,7 @@
 import { supabase } from '../client'
 import { Bucket, BucketInsert, BucketUpdate } from '../../types/database'
 import { NotFoundError, DatabaseError } from '../../utils/errors'
+import { parseVector } from '../pgvector'
 
 /**
  * Create a new bucket
@@ -54,7 +55,16 @@ export async function getBucketById(id: string): Promise<Bucket> {
 export async function listBucketsByPlanId(planId: string): Promise<Bucket[]> {
   const { data: buckets, error } = await supabase
     .from('buckets')
-    .select('*')
+    .select(`
+      id,
+      plan_id,
+      title,
+      description,
+      accent_color,
+      display_order,
+      created_at,
+      embedding
+    `)
     .eq('plan_id', planId)
     .order('display_order', { ascending: true })
 
@@ -62,7 +72,13 @@ export async function listBucketsByPlanId(planId: string): Promise<Bucket[]> {
     throw new DatabaseError('Failed to list buckets', error)
   }
 
-  return buckets || []
+  // Parse embedding column from pgvector format
+  const parsed = (buckets || []).map(bucket => ({
+    ...bucket,
+    embedding: parseVector(bucket.embedding) || undefined
+  }))
+
+  return parsed
 }
 
 /**

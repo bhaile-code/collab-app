@@ -1,4 +1,4 @@
-// GET /api/buckets/:id - Get a bucket
+ // GET /api/buckets/:id - Get a bucket
 // PATCH /api/buckets/:id - Update a bucket
 // DELETE /api/buckets/:id - Delete a bucket
 import { NextRequest } from 'next/server'
@@ -6,6 +6,8 @@ import { getBucketById, updateBucket, deleteBucket } from '@/lib/db/queries/buck
 import { updateBucketSchema } from '@/lib/utils/validation'
 import { successResponse, handleError } from '@/lib/utils/api-response'
 import { ValidationError } from '@/lib/utils/errors'
+import { generateEmbedding, BUCKET_EMBEDDINGS_CACHE_PREFIX } from '@/lib/services/embeddings'
+import { invalidateCache } from '@/lib/utils/cache'
 
 type RouteParams = {
   params: Promise<{ id: string }>
@@ -33,7 +35,29 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     }
 
     // Update bucket
-    const bucket = await updateBucket(id, validation.data)
+    let bucket = await updateBucket(id, validation.data as any)
+
+    // If title or description changed, regenerate embedding and invalidate cache
+    if (validation.data.title !== undefined || validation.data.description !== undefined) {
+      try {
+        const text = `${bucket.title}${bucket.description ? '\n' + bucket.description : ''}`.trim()
+        if (text) {
+          const embedding = await generateEmbedding(text)
+          bucket = await updateBucket(id, { embedding } as any)
+        }
+      } catch (error) {
+        console.error('Failed to regenerate embedding for bucket', { bucketId: id }, error)
+      }
+
+      try {
+        invalidateCache(`${BUCKET_EMBEDDINGS_CACHE_PREFIX}${bucket.plan_id}`)
+      } catch (error) {
+        console.error('Failed to invalidate bucket embeddings cache after bucket update', {
+          bucketId: id,
+          planId: bucket.plan_id,
+        }, error)
+      }
+    }
 
     return successResponse(bucket)
   } catch (error) {

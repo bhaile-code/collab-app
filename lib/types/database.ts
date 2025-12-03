@@ -26,6 +26,7 @@ export interface Bucket {
   description: string | null
   accent_color: BucketColor
   display_order: number
+  embedding?: number[]
   created_at: string
 }
 
@@ -46,6 +47,7 @@ export interface Idea {
   longitude: number | null
   geocoded_place_name: string | null
   link_preview_json: LinkPreview | null
+  embedding?: number[]
   attachments?: {
     url: string
     filename: string

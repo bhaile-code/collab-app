@@ -2,6 +2,7 @@
 import { supabase } from '../client'
 import { Idea, IdeaInsert, IdeaUpdate } from '../../types/database'
 import { NotFoundError, DatabaseError } from '../../utils/errors'
+import { parseVector } from '../pgvector'
 
 /**
  * Create a new idea
@@ -47,7 +48,8 @@ export async function getIdeaById(id: string): Promise<Idea> {
       longitude,
       geocoded_place_name,
       link_preview_json,
-      attachments
+      attachments,
+      embedding
     `)
     .eq('id', id)
     .single()
@@ -63,7 +65,11 @@ export async function getIdeaById(id: string): Promise<Idea> {
     throw new NotFoundError('Idea', id)
   }
 
-  return idea
+  // Parse embedding column from pgvector format
+  return {
+    ...idea,
+    embedding: parseVector(idea.embedding) || undefined
+  }
 }
 
 /**
@@ -89,7 +95,8 @@ export async function listIdeasByPlanId(planId: string): Promise<Idea[]> {
       longitude,
       geocoded_place_name,
       link_preview_json,
-      attachments
+      attachments,
+      embedding
     `)
     .eq('plan_id', planId)
     .order('created_at', { ascending: false })
@@ -101,7 +108,13 @@ export async function listIdeasByPlanId(planId: string): Promise<Idea[]> {
   console.log('📊 listIdeasByPlanId - fetched ideas:', ideas?.length)
   console.log('📊 First idea attachments:', ideas?.[0]?.attachments)
 
-  return ideas || []
+  // Parse embedding column from pgvector format
+  const parsed = (ideas || []).map(idea => ({
+    ...idea,
+    embedding: parseVector(idea.embedding) || undefined
+  }))
+
+  return parsed
 }
 
 /**

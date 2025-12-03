@@ -1,15 +1,54 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { Idea, Bucket } from '@/lib/types/database'
-import { createBucket } from '@/lib/db/queries/buckets'
+import { createBucket, updateBucket } from '@/lib/db/queries/buckets'
 import { updateIdea } from '@/lib/db/queries/ideas'
+import {
+  cosineSimilarity,
+  generateEmbedding,
+  getBucketEmbeddingsCached,
+  BUCKET_EMBEDDINGS_CACHE_PREFIX,
+} from '@/lib/services/embeddings'
+import { invalidateCache } from '@/lib/utils/cache'
 
 // Anthropic client
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
+const MIN_SIMILARITY = 0.35
+const TIE_THRESHOLD = 0.05
+const MIN_CONFIDENCE = 35
+const MAX_CONFIDENCE = 95
+const SIMILARITY_RANGE = 1 - MIN_SIMILARITY
+const CONFIDENCE_SPAN = MAX_CONFIDENCE - MIN_CONFIDENCE
+
+const USE_EMBEDDINGS_CLASSIFICATION =
+  process.env.USE_EMBEDDINGS_CLASSIFICATION !== 'false'
+
+const LOG_CLASSIFICATION_METRICS =
+  process.env.LOG_CLASSIFICATION_METRICS === 'true'
+
 let totalLLMCalls = 0
 let totalCostUSD = 0
+
+// Classification metrics (used for Phase 5 testing & observability)
+let totalClassificationRequests = 0
+let embeddingOnlyClassifications = 0
+let tieBreakerClassifications = 0
+let newBucketClassifications = 0
+let llmFallbackClassifications = 0
+let llmOnlyClassifications = 0
+
+function getClassificationStats() {
+  return {
+    total: totalClassificationRequests,
+    embedding_only: embeddingOnlyClassifications,
+    tie_breaker: tieBreakerClassifications,
+    new_bucket: newBucketClassifications,
+    llm_fallback: llmFallbackClassifications,
+    llm_only: llmOnlyClassifications,
+  }
+}
 
 function trackLLMCost(inputTokens: number | null | undefined, outputTokens: number | null | undefined) {
   if (inputTokens == null || outputTokens == null) return
@@ -21,6 +60,21 @@ function trackLLMCost(inputTokens: number | null | undefined, outputTokens: numb
 
   console.log(`LLM call #${totalLLMCalls}: ${inputTokens} in + ${outputTokens} out = $${cost.toFixed(4)}`)
   console.log(`Total LLM cost: $${totalCostUSD.toFixed(2)}`)
+}
+
+function similarityToConfidence(similarity: number): number {
+  if (similarity <= MIN_SIMILARITY) {
+    return MIN_CONFIDENCE
+  }
+
+  const raw =
+    MIN_CONFIDENCE +
+    ((similarity - MIN_SIMILARITY) * CONFIDENCE_SPAN) / SIMILARITY_RANGE
+
+  return Math.max(
+    MIN_CONFIDENCE,
+    Math.min(MAX_CONFIDENCE, Math.round(raw)),
+  )
 }
 
 function extractJsonArray(text: string): any[] {
@@ -157,6 +211,7 @@ Guidelines:
     }
 
     const createdBuckets: Bucket[] = []
+    let updatedEmbeddings = false
 
     for (let i = 0; i < bucketSpecs.length; i++) {
       const spec = bucketSpecs[i]
@@ -171,6 +226,22 @@ Guidelines:
       })
       createdBuckets.push(bucket)
 
+      // Best-effort embedding generation for emergent buckets
+      try {
+        const text = `${bucket.title}${bucket.description ? '\n' + bucket.description : ''}`.trim()
+        if (text) {
+          const embedding = await generateEmbedding(text)
+          await updateBucket(bucket.id, { embedding } as any)
+          updatedEmbeddings = true
+        }
+      } catch (error) {
+        console.error('Failed to generate embedding for emergent bucket', {
+          planId,
+          bucketId: bucket.id,
+          title: bucket.title,
+        }, error)
+      }
+
       // Assign ideas to this bucket
       for (const ideaIndex of spec.idea_assignments || []) {
         const idea = ideas[ideaIndex - 1]
@@ -180,6 +251,16 @@ Guidelines:
             confidence: 90, // High confidence for LLM assignments
           })
         }
+      }
+    }
+
+    if (updatedEmbeddings) {
+      try {
+        invalidateCache(`${BUCKET_EMBEDDINGS_CACHE_PREFIX}${planId}`)
+      } catch (error) {
+        console.error('Failed to invalidate bucket embeddings cache after emergent bucket creation', {
+          planId,
+        }, error)
       }
     }
 
@@ -211,11 +292,7 @@ Guidelines:
   }
 }
 
-/**
- * Classifies a single idea into existing buckets or creates a new one
- * Called when: Adding idea to plan that already has buckets
- */
-export async function classifyIdeaIntoBucket(
+async function classifyWithLLM(
   idea: Idea,
   existingBuckets: Bucket[],
   planContext?: string,
@@ -227,7 +304,14 @@ Title: ${idea.title}
 Description: ${idea.description ?? '(no description)'}
 
 EXISTING CATEGORIES:
-${existingBuckets.map((b, i) => `${i + 1}. ${b.title}${b.description ? ' - ' + b.description : ''}`).join('\n')}
+${existingBuckets
+  .map(
+    (b, i) =>
+      `${i + 1}. ${b.title}${
+        b.description ? ' - ' + b.description : ''
+      }`,
+  )
+  .join('\n')}
 
 TASK: Decide if this idea fits well into an existing category OR if it needs a new category.
 
@@ -284,7 +368,12 @@ IMPORTANT:
     }
 
     // Debug: log raw LLM response for single-idea bucketing
-    console.log('LLM raw bucket classification response for idea', idea.id, ':', content.text)
+    console.log(
+      'LLM raw bucket classification response for idea',
+      idea.id,
+      ':',
+      content.text,
+    )
 
     let result: {
       action: 'assign_existing' | 'create_new'
@@ -301,7 +390,12 @@ IMPORTANT:
     try {
       result = extractJsonObject(content.text)
     } catch (err) {
-      console.error('Failed to parse LLM classification JSON:', err, 'raw text:', content.text)
+      console.error(
+        'Failed to parse LLM classification JSON:',
+        err,
+        'raw text:',
+        content.text,
+      )
       throw new Error('Malformed JSON from LLM')
     }
 
@@ -315,7 +409,7 @@ IMPORTANT:
       console.warn('Low confidence assignment detected:', {
         confidence: result.confidence,
         reasoning: result.reasoning,
-        ideaTitle: idea.title
+        ideaTitle: idea.title,
       })
     }
 
@@ -325,9 +419,10 @@ IMPORTANT:
       action: result.action,
       confidence: result.confidence,
       reasoning: result.reasoning,
-      targetBucket: result.action === 'assign_existing'
-        ? existingBuckets[result.existing_bucket_number! - 1]?.title
-        : result.new_bucket?.title
+      targetBucket:
+        result.action === 'assign_existing'
+          ? existingBuckets[result.existing_bucket_number! - 1]?.title
+          : result.new_bucket?.title,
     })
 
     if (result.action === 'assign_existing' && typeof result.existing_bucket_number === 'number') {
@@ -343,13 +438,37 @@ IMPORTANT:
 
     if (result.action === 'create_new' && result.new_bucket) {
       const spec = result.new_bucket
-      const newBucket = await createBucket({
+      let newBucket = await createBucket({
         plan_id: idea.plan_id,
         title: spec.title,
         description: spec.description ?? null,
         accent_color: (spec.accent_color || 'gray') as Bucket['accent_color'],
         display_order: existingBuckets.length,
       })
+
+      // Best-effort embedding generation for LLM-created bucket
+      try {
+        const text = `${newBucket.title}${newBucket.description ? '\n' + newBucket.description : ''}`.trim()
+        if (text) {
+          const embedding = await generateEmbedding(text)
+          newBucket = await updateBucket(newBucket.id, { embedding } as any)
+        }
+      } catch (error) {
+        console.error('Failed to generate embedding for LLM-created bucket', {
+          planId: idea.plan_id,
+          bucketId: newBucket.id,
+          title: newBucket.title,
+        }, error)
+      }
+
+      try {
+        invalidateCache(`${BUCKET_EMBEDDINGS_CACHE_PREFIX}${idea.plan_id}`)
+      } catch (error) {
+        console.error('Failed to invalidate bucket embeddings cache after LLM-created bucket', {
+          planId: idea.plan_id,
+          bucketId: newBucket.id,
+        }, error)
+      }
 
       return {
         bucketId: newBucket.id,
@@ -387,6 +506,401 @@ IMPORTANT:
       confidence: 40,
       isNewBucket: false,
     }
+  }
+}
+
+async function classifyWithLLMTieBreaker(
+  idea: Idea,
+  tiedBuckets: { bucket: Bucket; similarity: number }[],
+  planContext?: string,
+): Promise<{ bucketId: string }> {
+  if (tiedBuckets.length === 1) {
+    return { bucketId: tiedBuckets[0].bucket.id }
+  }
+
+  const prompt = `You are resolving a tie between multiple existing categories for a new idea on a planning board.
+
+${planContext ? `PLAN CONTEXT: ${planContext}\n\n` : ''}NEW IDEA:
+Title: ${idea.title}
+Description: ${idea.description ?? '(no description)'}
+
+TIED CATEGORIES:
+${tiedBuckets
+  .map(
+    (entry, i) =>
+      `${i + 1}. ${entry.bucket.title}${
+        entry.bucket.description ? ' - ' + entry.bucket.description : ''
+      } (similarity: ${entry.similarity.toFixed(3)})`,
+  )
+  .join('\n')}
+
+TASK: Choose the single best existing category for this idea. Do NOT create new categories.
+
+Return ONLY a JSON object (no markdown, no code fences, no extra text):
+
+{
+  "chosen_bucket_number": 1,
+  "reasoning": "Brief 1-2 sentence explanation"
+}`
+
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 512,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+    })
+
+    const anyMessage = message as any
+    if (anyMessage?.usage) {
+      trackLLMCost(anyMessage.usage.input_tokens, anyMessage.usage.output_tokens)
+    }
+
+    const content = message.content[0]
+    if (!content || content.type !== 'text') {
+      throw new Error('Unexpected response type from LLM tie-breaker')
+    }
+
+    console.log(
+      'LLM raw tie-breaker response for idea',
+      idea.id,
+      ':',
+      content.text,
+    )
+
+    const result = extractJsonObject(content.text) as {
+      chosen_bucket_number?: number
+      reasoning?: string
+    }
+
+    const index =
+      typeof result.chosen_bucket_number === 'number'
+        ? result.chosen_bucket_number - 1
+        : 0
+
+    const chosen = tiedBuckets[index] ?? tiedBuckets[0]
+
+    console.log('LLM tie-breaker decision:', {
+      ideaTitle: idea.title,
+      chosenBucket: chosen.bucket.title,
+      reasoning: result.reasoning,
+    })
+
+    return { bucketId: chosen.bucket.id }
+  } catch (error) {
+    console.error('Tie-breaker LLM failed, falling back to top-similarity bucket:', error)
+    return { bucketId: tiedBuckets[0].bucket.id }
+  }
+}
+
+async function createNewBucketForIdea(
+  idea: Idea,
+  existingBuckets: Bucket[],
+  planContext?: string,
+): Promise<{ bucketId: string; confidence: number }> {
+  const prompt = `You are helping organize ideas for a collaborative planning board.
+
+${planContext ? `PLAN CONTEXT: ${planContext}\n\n` : ''}NEW IDEA:
+Title: ${idea.title}
+Description: ${idea.description ?? '(no description)'}
+
+EXISTING CATEGORIES (none are a good semantic match, we need a new one):
+${existingBuckets
+  .map(
+    (b, i) =>
+      `${i + 1}. ${b.title}${
+        b.description ? ' - ' + b.description : ''
+      }`,
+  )
+  .join('\n')}
+
+TASK: Propose a single new category (bucket) that would best organize this idea, distinct from the existing ones.
+
+Return ONLY a JSON object (no markdown, no code fences, no extra text):
+
+{
+  "title": "Category Name",
+  "description": "Brief description",
+  "accent_color": "blue"
+}
+
+Guidelines:
+- The new category should be semantically coherent and not redundant with existing ones.
+- Prefer clear, specific names based on the idea content.
+- Choose an accent color that makes semantic sense.`
+
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 512,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+    })
+
+    const anyMessage = message as any
+    if (anyMessage?.usage) {
+      trackLLMCost(anyMessage.usage.input_tokens, anyMessage.usage.output_tokens)
+    }
+
+    const content = message.content[0]
+    if (!content || content.type !== 'text') {
+      throw new Error('Unexpected response type from LLM when creating new bucket')
+    }
+
+    console.log(
+      'LLM raw new-bucket response for idea',
+      idea.id,
+      ':',
+      content.text,
+    )
+
+    const spec = extractJsonObject(content.text) as {
+      title?: string
+      description?: string
+      accent_color?: string
+    }
+
+    if (!spec.title) {
+      throw new Error('LLM did not return a title for the new bucket')
+    }
+
+    let newBucket = await createBucket({
+      plan_id: idea.plan_id,
+      title: spec.title,
+      description: spec.description ?? null,
+      accent_color: (spec.accent_color || 'gray') as Bucket['accent_color'],
+      display_order: existingBuckets.length,
+    })
+
+    // Best-effort embedding generation for new bucket
+    try {
+      const text = `${newBucket.title}${newBucket.description ? '\n' + newBucket.description : ''}`.trim()
+      if (text) {
+        const embedding = await generateEmbedding(text)
+        newBucket = await updateBucket(newBucket.id, { embedding } as any)
+      }
+    } catch (error) {
+      console.error('Failed to generate embedding for new bucket', {
+        planId: idea.plan_id,
+        bucketId: newBucket.id,
+        title: newBucket.title,
+      }, error)
+    }
+
+    try {
+      invalidateCache(`${BUCKET_EMBEDDINGS_CACHE_PREFIX}${idea.plan_id}`)
+    } catch (error) {
+      console.error('Failed to invalidate bucket embeddings cache after new bucket creation', {
+        planId: idea.plan_id,
+        bucketId: newBucket.id,
+      }, error)
+    }
+
+    return {
+      bucketId: newBucket.id,
+      confidence: 75,
+    }
+  } catch (error) {
+    console.error(
+      'Failed to create new bucket via LLM, falling back to LLM classification:',
+      error,
+    )
+
+    const fallback = await classifyWithLLM(idea, existingBuckets, planContext)
+    return {
+      bucketId: fallback.bucketId,
+      confidence: fallback.confidence,
+    }
+  }
+}
+
+/**
+ * Classifies a single idea into existing buckets or creates a new one.
+ * Embeddings-first flow:
+ * 1) Generate idea embedding
+ * 2) Compare against cached bucket embeddings
+ * 3) Clear winner (>= MIN_SIMILARITY, no ties) → assign immediately
+ * 4) Tie (within TIE_THRESHOLD) → LLM tie-breaker
+ * 5) All < MIN_SIMILARITY → create new bucket via LLM
+ * Falls back to full LLM classification on any embedding failure.
+ */
+export async function classifyIdeaIntoBucket(
+  idea: Idea,
+  existingBuckets: Bucket[],
+  planContext?: string,
+): Promise<{ bucketId: string; confidence: number; isNewBucket: boolean }> {
+  totalClassificationRequests++
+
+  if (!USE_EMBEDDINGS_CLASSIFICATION || existingBuckets.length === 0) {
+    llmOnlyClassifications++
+
+    if (LOG_CLASSIFICATION_METRICS) {
+      console.log(
+        '[classification] Using LLM-only classification (embeddings disabled or no buckets)',
+        {
+          ideaId: idea.id,
+          ideaTitle: idea.title,
+          stats: getClassificationStats(),
+        },
+      )
+    }
+    return classifyWithLLM(idea, existingBuckets, planContext)
+  }
+
+  try {
+    const bucketEmbeddings = await getBucketEmbeddingsCached(idea.plan_id)
+
+    if (!bucketEmbeddings || bucketEmbeddings.size === 0) {
+      console.warn(
+        '[classification] No bucket embeddings available; falling back to LLM classification',
+      )
+      return classifyWithLLM(idea, existingBuckets, planContext)
+    }
+
+    const ideaText = `${idea.title}\n${idea.description ?? ''}`
+    const ideaEmbedding = await generateEmbedding(ideaText)
+
+    const scored: { bucket: Bucket; similarity: number }[] = []
+
+    for (const bucket of existingBuckets) {
+      const bucketEmbedding = bucketEmbeddings.get(bucket.id)
+      if (!bucketEmbedding) continue
+
+      try {
+        const similarity = cosineSimilarity(ideaEmbedding, bucketEmbedding)
+        scored.push({ bucket, similarity })
+      } catch (error) {
+        console.error(
+          '[classification] Failed to compute similarity for bucket',
+          { bucketId: bucket.id, title: bucket.title },
+          error,
+        )
+      }
+    }
+
+    if (!scored.length) {
+      console.warn(
+        '[classification] No valid bucket similarities; falling back to LLM classification',
+      )
+      return classifyWithLLM(idea, existingBuckets, planContext)
+    }
+
+    scored.sort((a, b) => b.similarity - a.similarity)
+
+    const best = scored[0]
+    const bestSim = best.similarity
+
+    if (LOG_CLASSIFICATION_METRICS) {
+      console.log('[classification] Embedding similarities for idea', idea.id, {
+        ideaTitle: idea.title,
+        bestBucket: best.bucket.title,
+        bestSimilarity: bestSim,
+        all: scored.slice(0, 5).map((s) => ({
+          bucket: s.bucket.title,
+          similarity: s.similarity,
+        })),
+      })
+    }
+
+    if (bestSim < MIN_SIMILARITY) {
+      newBucketClassifications++
+
+      console.log(
+        '[classification] All bucket similarities below threshold; creating new bucket via LLM',
+        {
+          ideaId: idea.id,
+          ideaTitle: idea.title,
+          bestSimilarity: bestSim,
+          stats: LOG_CLASSIFICATION_METRICS ? getClassificationStats() : undefined,
+        },
+      )
+      const result = await createNewBucketForIdea(
+        idea,
+        existingBuckets,
+        planContext,
+      )
+      return {
+        bucketId: result.bucketId,
+        confidence: result.confidence,
+        isNewBucket: true,
+      }
+    }
+
+    const tied = scored.filter(
+      (entry) => bestSim - entry.similarity <= TIE_THRESHOLD,
+    )
+
+    if (tied.length > 1) {
+      tieBreakerClassifications++
+
+      console.log(
+        '[classification] Tie detected between buckets; invoking LLM tie-breaker',
+        {
+          ideaId: idea.id,
+          ideaTitle: idea.title,
+          bestSimilarity: bestSim,
+          tiedBuckets: tied.map((t) => ({
+            bucketId: t.bucket.id,
+            title: t.bucket.title,
+            similarity: t.similarity,
+          })),
+          stats: LOG_CLASSIFICATION_METRICS ? getClassificationStats() : undefined,
+        },
+      )
+
+      const tieResult = await classifyWithLLMTieBreaker(
+        idea,
+        tied,
+        planContext,
+      )
+
+      const chosen =
+        scored.find((s) => s.bucket.id === tieResult.bucketId) ?? best
+      const confidence = similarityToConfidence(chosen.similarity)
+
+      return {
+        bucketId: chosen.bucket.id,
+        confidence,
+        isNewBucket: false,
+      }
+    }
+
+    const confidence = similarityToConfidence(bestSim)
+
+    embeddingOnlyClassifications++
+
+    console.log('[classification] Embeddings clear winner', {
+      ideaId: idea.id,
+      ideaTitle: idea.title,
+      bucketId: best.bucket.id,
+      bucketTitle: best.bucket.title,
+      similarity: bestSim,
+      confidence,
+      stats: LOG_CLASSIFICATION_METRICS ? getClassificationStats() : undefined,
+    })
+
+    return {
+      bucketId: best.bucket.id,
+      confidence,
+      isNewBucket: false,
+    }
+  } catch (error) {
+    llmFallbackClassifications++
+
+    console.error(
+      '[classification] Embeddings-based classification failed; falling back to LLM classification',
+      error,
+      LOG_CLASSIFICATION_METRICS ? { stats: getClassificationStats() } : undefined,
+    )
+    return classifyWithLLM(idea, existingBuckets, planContext)
   }
 }
 

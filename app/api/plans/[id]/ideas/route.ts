@@ -13,6 +13,7 @@ import { createEmergentBuckets, classifyIdeaIntoBucket } from '@/lib/services/au
 import { geocodeLocation } from '@/lib/services/geocoding'
 import { fetchLinkPreview } from '@/lib/services/link-preview'
 import { rateLimit } from '@/lib/utils/rate-limit'
+import { generateEmbedding } from '@/lib/services/embeddings'
 
 type RouteParams = {
   params: Promise<{ id: string }>
@@ -75,6 +76,17 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       link_preview_json: null,
       attachments: attachments ?? undefined,
     })
+
+    // Generate and persist idea embedding (best-effort, non-fatal on failure)
+    try {
+      const embeddingText = `${idea.title}\n${idea.description ?? ''}`.trim()
+      if (embeddingText) {
+        const embedding = await generateEmbedding(embeddingText)
+        await updateIdea(idea.id, { embedding })
+      }
+    } catch (error) {
+      console.error('Failed to generate embedding for idea', { ideaId: idea.id, planId }, error)
+    }
 
     // Background metadata enrichment (non-blocking)
     // Only run for fields the user did not explicitly provide
