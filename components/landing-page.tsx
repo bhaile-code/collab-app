@@ -19,7 +19,7 @@ interface Plan {
 
 interface LandingPageProps {
   plans: Plan[]
-  onCreatePlan: (plan: { planContext: string }) => void
+  onCreatePlan: (plan: { description: string }) => void
   onOpenPlan: (planId: string) => void
 }
 
@@ -44,7 +44,7 @@ export function LandingPage({ plans, onCreatePlan, onOpenPlan }: LandingPageProp
     // Simulate a brief loading state for UX
     await new Promise((resolve) => setTimeout(resolve, 600))
 
-    onCreatePlan({ planContext: planContext.trim() })
+    onCreatePlan({ description: planContext.trim() })
     setPlanContext("")
     setIsLoading(false)
     setIsModalOpen(false)

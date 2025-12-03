@@ -47,10 +47,10 @@ export default function Home() {
     loadLastPlan()
   }, [])
 
-  const handleCreatePlan = async (planData: { planContext: string }) => {
+  const handleCreatePlan = async (planData: { description: string }) => {
     try {
       const plan = await createPlan({
-        planContext: planData.planContext,
+        description: planData.description,
       })
 
       // Remember this as the current plan
