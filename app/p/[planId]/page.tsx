@@ -62,8 +62,10 @@ interface TimelineEvent {
 interface MapLocation {
   id: string
   name: string
-  x: number
-  y: number
+  lat: number   // latitude (-90 to 90)
+  lng: number   // longitude (-180 to 180)
+  x?: number    // fallback for mock data (percentage)
+  y?: number    // fallback for mock data (percentage)
   bucketColor?: BucketColor
   cards: Array<{
     id: string
@@ -269,10 +271,15 @@ export default function PlanPage({ params }: PageProps) {
 
     const locationMap = new Map<string, MapLocation>()
 
-    const positions: Record<string, { x: number; y: number }> = {
-      Tuscany: { x: 30, y: 35 },
-      Florence: { x: 55, y: 25 },
-      "Villa in Siena": { x: 70, y: 50 },
+    // Real coordinates for Italian locations (and fallback x/y for visual positioning)
+    const positions: Record<string, { lat: number; lng: number; x: number; y: number }> = {
+      Tuscany: { lat: 43.7711, lng: 11.2486, x: 30, y: 35 },  // Central Tuscany
+      Florence: { lat: 43.7696, lng: 11.2558, x: 55, y: 25 },  // Florence city
+      "Villa in Siena": { lat: 43.3188, lng: 11.3308, x: 70, y: 50 },  // Siena
+      Rome: { lat: 41.9028, lng: 12.4964, x: 40, y: 60 },
+      Milan: { lat: 45.4642, lng: 9.1900, x: 20, y: 15 },
+      Venice: { lat: 45.4408, lng: 12.3155, x: 65, y: 20 },
+      Naples: { lat: 40.8518, lng: 14.2681, x: 55, y: 75 },
     }
 
     ideas
@@ -283,10 +290,17 @@ export default function PlanPage({ params }: PageProps) {
         const color: BucketColor = info?.color ?? "gray"
 
         if (!locationMap.has(locName)) {
-          const pos = positions[locName] || { x: Math.random() * 60 + 20, y: Math.random() * 50 + 20 }
+          const pos = positions[locName] || {
+            lat: 42.0 + Math.random() * 4,  // Random location in Italy
+            lng: 10.0 + Math.random() * 6,
+            x: Math.random() * 60 + 20,
+            y: Math.random() * 50 + 20,
+          }
           locationMap.set(locName, {
             id: `loc-${locName.replace(/\s+/g, "-").toLowerCase()}`,
             name: locName,
+            lat: pos.lat,
+            lng: pos.lng,
             x: pos.x,
             y: pos.y,
             bucketColor: color,
