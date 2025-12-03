@@ -5,8 +5,8 @@
 export interface Plan {
   id: string
   title: string
-  description: string | null
-  plan_context: string | null
+  description: string | null // DEPRECATED: Not currently used
+  plan_context: string | null // The user's description (used for title generation and classification)
   created_at: string
   updated_at: string
 }

@@ -6,9 +6,8 @@ import { z } from 'zod'
 // ============================================================================
 
 export const createPlanSchema = z.object({
-  planContext: z.string().min(10).max(500),
+  description: z.string().min(10).max(500),
   title: z.string().min(1).max(100).optional(),
-  description: z.string().optional(),
 })
 
 export const updatePlanSchema = z.object({

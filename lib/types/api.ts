@@ -27,9 +27,8 @@ export type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse
 // ============================================================================
 
 export interface CreatePlanRequest {
-  planContext: string
-  title?: string
-  description?: string
+  description: string // User's description of the plan (10-500 chars)
+  title?: string // Optional: override auto-generated title
 }
 
 export type CreatePlanResponse = ApiResponse<Plan>
